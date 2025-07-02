@@ -1,3 +1,7 @@
+!compiled_files/.gitkeep
+compiled_files/*
+
+
 ### Autohotkey template
 # Windows image file caches
 Thumbs.db
