@@ -1,89 +1,116 @@
 #Requires AutoHotkey v2.0
 
-targetExe := "xiaowei.exe"
+; --------- CONFIGURATION ---------
+TempDir       := A_ScriptDir "\temp\ahk-auto-backup-code"      ; where screenshots are stored
+OCRApi        := "https://f.zuko.pro/api/tools/ocr/parse"        ; OCR endpoint
+
+; --------- ENTRY POINT ---------
+main()
+return
 
 main() {
-    global 
-    ; 1. Activate target window
-    if !WinExist("ahk_exe " targetExe) {
-        MsgBox "Window not found: " targetExe
-    ExitApp
+    global TempDir, OCRApi
+    try {
+        DirCreate(TempDir)
+        ToolTip "Loading..."
+
+        serials := ListAdbDevices()
+        if (serials.Length = 0)
+            throw Error("No connected devices found via ADB")
+
+        resultMap := Map()
+        debugLog  := "Devices:" . StrJoin(serials, ", ") . "`n"
+
+        for serial in serials {
+            try {
+                imgPath := TempDir "\" serial ".png"
+                CaptureDeviceScreenshot(serial, imgPath)
+                debugLog .= "Captured " serial " -> " imgPath "`n"
+
+                base64 := ImageFileToBase64(imgPath)
+                debugLog .= "Base64Size(" serial ")=" base64.Length "`n"
+
+                ocr := PostBase64ToOCR(base64)
+                debugLog .= "OCRResponse(" serial ")=" ocr "`n"
+
+                ; join multi-line result to one line
+                ocrClean := StrReplace(StrReplace(ocr, "`r"), "`n")
+                resultMap[serial] := ocrClean
+            } catch e {
+                throw Error("Serial " serial " failed: " e.Message)
+            }
+        }
+
+        ; save JSON to result.json
+        json := MapToJson(resultMap)
+        FileDelete("result.json")
+        FileAppend(json, "result.json")
+
+        ; copy values to clipboard (1 line / value)
+        clip := ""
+        for , v in resultMap
+            clip .= v "`n"
+        Clipboard := Trim(clip, "`n")
+
+        ToolTip ""
+        MsgBox "DONE"
+    } catch e {
+        ToolTip ""
+        MsgBox "ERROR: " e.Message
+        ; dump debug information to console
+        OutputDebug("AHK-DEBUG:\n" debugLog)
     }
-
-    ; Looping devices here
-    ocrResult := PostBase64ToOCR(base64Image)
-
-    ; 5. Debug output
-    MsgBox "OCR Result:`n" ocrResult
 }
 
-; --- Function: Capture a window and save as PNG ---
-CaptureWindowToPNG(winTitle, savePath) {
-    hwnd := WinExist(winTitle)
-    local si := Buffer(16, 0)   ; <-- initialize buffer properly
-    local pBitmap := 0          ; <-- initialize pBitmap
-    if !hwnd
-        return false
+; --------- FUNCTIONS ---------
 
-    ; Get window size
-    WinGetPos &x, &y, &w, &h, hwnd
+ListAdbDevices() {
+    out := ""
+    RunWait A_ComSpec " /c adb devices", , "Hide StdOut Var out"
 
-    ; Create compatible DC and bitmap
-    hDC := DllCall("GetDC", "ptr", hwnd, "ptr")
-    mDC := DllCall("gdi32\CreateCompatibleDC", "ptr", hDC, "ptr")
-    hBM := DllCall("gdi32\CreateCompatibleBitmap", "ptr", hDC, "int", w, "int", h, "ptr")
-    if !hBM {
-        DllCall("ReleaseDC", "ptr", hwnd, "ptr", hDC)
-        return false
+    serials := []
+    for line in StrSplit(out, "`n", "`r") {
+        line := Trim(line)
+        if (line = "" || InStr(line, "List of devices"))
+            continue
+        parts := StrSplit(line, "`t")
+        serial := Trim(parts[1])
+        status := parts.Length > 1 ? Trim(parts[2]) : ""
+        if (serial != "" && status = "device")
+            serials.Push(serial)
     }
-    obm := DllCall("gdi32\SelectObject", "ptr", mDC, "ptr", hBM, "ptr")
-
-    ; BitBlt capture
-    success := DllCall("gdi32\BitBlt", "ptr", mDC, "int", 0, "int", 0, "int", w, "int", h, "ptr", hDC, "int", 0, "int", 0, "uint", 0x00CC0020)
-
-    ; Init GDI+
-    static gdiplusToken := 0
-    if (gdiplusToken = 0) {
-        si := Buffer(16, 0)
-        NumPut("UInt", 1, si, 0)
-        DllCall("gdiplus\GdiplusStartup", "ptr*", &gdiplusToken, "ptr", si, "ptr", 0)
-    }
-
-    ; Save to PNG
-    DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "ptr", hBM, "ptr", 0, "ptr*", &pBitmap)
-    clsid := GetEncoderClsid("image/png")
-    DllCall("gdiplus\GdipSaveImageToFile", "ptr", pBitmap, "wstr", savePath, "ptr", clsid, "ptr", 0)
-    DllCall("gdiplus\GdipDisposeImage", "ptr", pBitmap)
-
-    ; Cleanup
-    DllCall("gdi32\SelectObject", "ptr", mDC, "ptr", obm)
-    DllCall("gdi32\DeleteObject", "ptr", hBM)
-    DllCall("gdi32\DeleteDC", "ptr", mDC)
-    DllCall("ReleaseDC", "ptr", hwnd, "ptr", hDC)
-
-    return success
+    return serials
 }
 
-; --- Function: Get image encoder CLSID ---
-GetEncoderClsid(mimeType) {
-    DllCall("gdiplus\GdipGetImageEncodersSize", "uint*", &count := 0, "uint*", &size := 0)
-    local buffer := Buffer(size, 0)
-    DllCall("gdiplus\GdipGetImageEncoders", "uint", count, "uint", size, "ptr", buffer)
+CaptureDeviceScreenshot(serial, savePath) {
+    RunWait A_ComSpec " /c adb -s " serial " exec-out screencap -p > \"" savePath "\"", , "Hide"
+    if !FileExist(savePath)
+        throw Error("Screenshot not saved for " serial)
+}
 
-    Loop count {
-        item := buffer.Ptr + (A_Index - 1) * 84  ; GpImageCodecInfo size
-        if (StrGet(NumGet(item + 68, "ptr")) = mimeType)
-            return item
-    }
-    return 0
+ImageFileToBase64(path) {
+    file := FileOpen(path, "r")
+    if !file
+        throw Error("Cannot open image file " path)
+    buf := Buffer(file.Length, 0)
+    file.RawRead(buf, buf.Size)
+    file.Close()
+    return CryptBinaryToBase64(buf)
+}
+
+MapToJson(m) {
+    json := "{"
+    for k, v in m
+        json .= '"' k '":"' StrReplace(v, '"', '\\"') '",' 
+    return SubStr(json, 1, -1) "}"
 }
 
 ; --- Function: Convert binary to base64 ---
 CryptBinaryToBase64(data) {
     size := BufGetSize(data)
-    DllCall("crypt32\CryptBinaryToStringW", "ptr", data, "uint", size, "uint", 0x40000001, "ptr", 0, "uint*", &len := 0)
+    DllCall("crypt32\\CryptBinaryToStringW", "ptr", data, "uint", size, "uint", 0x40000001, "ptr", 0, "uint*", &len := 0)
     out := Buffer(len * 2, 0)
-    DllCall("crypt32\CryptBinaryToStringW", "ptr", data, "uint", size, "uint", 0x40000001, "ptr", out, "uint*", &len)
+    DllCall("crypt32\\CryptBinaryToStringW", "ptr", data, "uint", size, "uint", 0x40000001, "ptr", out, "uint*", &len)
     return StrReplace(StrGet(out), "`r`n", "")
 }
 
@@ -96,10 +123,11 @@ BufGetSize(buf) {
 
 ; --- Function: POST base64 to API ---
 PostBase64ToOCR(base64Image) {
+    global OCRApi
     http := ComObject("WinHttp.WinHttpRequest.5.1")
-    http.Open("POST", "https://f.zuko.pro/api/tools/ocr/parse", true)
+    http.Open("POST", OCRApi, true)
     http.SetRequestHeader("Content-Type", "application/json")
-    body := "{" . '"base64Image": "' . base64Image . '"}'
+    body := "{" '"base64Image":"' base64Image '"}'
     http.Send(body)
     http.WaitForResponse()
     return http.ResponseText
