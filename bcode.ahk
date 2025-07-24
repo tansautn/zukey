@@ -1,9 +1,12 @@
 #Requires AutoHotkey v2.0
-
+#Include "libs\JSON.ahk"
 targetExe := "xiaowei.exe"
-
+tempDir := A_ScriptDir . "\auto-backup-code"
+ocrUrl := "https://f.zuko.pro/api/tools/ocr/backup-codes"
+DirCreate(tempDir)
 main() {
-    global 
+    global targetExe
+    global tempDir
     local devices := []
     local results := Map()
     local errorMsg := ""
@@ -20,11 +23,10 @@ main() {
         if !WinExist("ahk_exe " targetExe) {
             MsgBox "Window not found: " targetExe ". Continuing with ADB operations..."
         }
-        
+        WinActivate("ahk_exe " targetExe)
         ; 2. List ADB devices
         ToolTip "Getting ADB device list...", 100, 100
         devices := GetADBDevices()
-        
         if (devices.Length = 0) {
             throw Error("No ADB devices found")
         }
@@ -34,13 +36,21 @@ main() {
             ToolTip "Processing device " . index . "/" . devices.Length . ": " . deviceSerial, 100, 100
             
             ; 4. Take screenshot using ADB
-            screenshotFile := "temp/ahk-auto-backup-code/" . deviceSerial . ".png"
-            if !TakeADBScreenshot(deviceSerial, screenshotFile) {
-                throw Error("Failed to take screenshot for device: " . deviceSerial)
+            screenshotFile := tempDir . "\" . deviceSerial . ".png"
+            if FileExist(screenshotFile) {
+                FileDelete(screenshotFile)
             }
-            
+;            Pause
+            if !TakeADBScreenshot(deviceSerial, screenshotFile) {
+                ; Try alternative method
+                if !TakeADBScreenshotAlternative(deviceSerial, screenshotFile) {
+                    throw Error("Failed to take screenshot for device: " . deviceSerial)
+                }
+            }
             ; 5. Convert image to base64
             base64Image := ImageToBase64(screenshotFile)
+;            MsgBox "Base64 length: " . StrLen(base64Image)
+;            MsgBox base64Image
             if (base64Image = "") {
                 throw Error("Failed to convert image to base64 for device: " . deviceSerial)
             }
@@ -48,6 +58,9 @@ main() {
             ; 6. Call OCR API
             ToolTip "Processing OCR for device: " . deviceSerial, 100, 100
             ocrResult := PostBase64ToOCR(base64Image)
+            jsonOcr := JSON.Load(ocrResult)
+;            MsgBox(JSON.Dump(jsonOcr))
+;            Pause
             if (ocrResult = "") {
                 throw Error("Failed to get OCR result for device: " . deviceSerial)
             }
@@ -120,45 +133,110 @@ GetADBDevices() {
     return devices
 }
 
-; --- Function: Take screenshot using ADB ---
+; --- Function: Take screenshot using ADB (Fixed Version) ---
 TakeADBScreenshot(deviceSerial, savePath) {
     try {
-        ; Use adb to take screenshot
         shell := ComObject("WScript.Shell")
-        
-        ; Take screenshot on device
-        cmd1 := "adb -s " . deviceSerial . " shell screencap -p /sdcard/screenshot.png"
-        exec1 := shell.Exec(cmd1)
-        exec1.StdIn.Close()
-        
-        ; Wait for completion
-        while (exec1.Status = 0) {
+
+        ; Method 1: Sử dụng PowerShell với proper escaping
+        cmd := 'powershell -Command "& {adb -s `"' . deviceSerial . '`" exec-out screencap -p | Set-Content -Path `"' . savePath . '`" -Encoding Byte -NoNewline}"'
+
+        OutputDebug("Executing command: " . cmd)
+
+        exec := shell.Exec(cmd)
+        exec.StdIn.Close()
+
+        ; Wait for completion với timeout
+        timeout := 10000  ; 10 seconds
+        startTime := A_TickCount
+
+        while (exec.Status = 0) {
+            if (A_TickCount - startTime > timeout) {
+                OutputDebug("Screenshot command timed out")
+                return false
+            }
             Sleep 100
         }
-        
-        ; Pull screenshot to local
-        cmd2 := "adb -s " . deviceSerial . " pull /sdcard/screenshot.png " . savePath
-        exec2 := shell.Exec(cmd2)
-        exec2.StdIn.Close()
-        
-        ; Wait for completion
-        while (exec2.Status = 0) {
-            Sleep 100
+
+        ; Check exit code
+        if (exec.ExitCode != 0) {
+            OutputDebug("ADB command failed with exit code: " . exec.ExitCode)
+            errorOutput := exec.StdErr.ReadAll()
+            OutputDebug("Error output: " . errorOutput)
+            return false
         }
-        
-        ; Clean up device screenshot
-        cmd3 := "adb -s " . deviceSerial . " shell rm /sdcard/screenshot.png"
-        exec3 := shell.Exec(cmd3)
-        exec3.StdIn.Close()
-        
-        ; Check if file exists
-        return FileExist(savePath)
-        
-    } catch {
+
+        ; Verify file exists and has content
+        if (!FileExist(savePath)) {
+            OutputDebug("Screenshot file was not created: " . savePath)
+            return false
+        }
+
+        ; Check file size (should be > 0)
+        fileObj := FileOpen(savePath, "r")
+        fileSize := fileObj.Length
+        fileObj.Close()
+
+        if (fileSize = 0) {
+            OutputDebug("Screenshot file is empty: " . savePath)
+            return false
+        }
+
+        OutputDebug("Screenshot saved successfully: " . savePath . " (Size: " . fileSize . " bytes)")
+        return true
+
+    } catch Error as e {
+        OutputDebug("Exception in TakeADBScreenshot: " . e.message)
         return false
     }
 }
 
+; Alternative method using cmd if PowerShell doesn't work
+TakeADBScreenshotAlternative(deviceSerial, savePath) {
+    try {
+        shell := ComObject("WScript.Shell")
+
+        ; Create temporary path in system temp
+        tempFile := EnvGet("TEMP") . "\adb_screenshot_" . A_TickCount . ".png"
+
+        ; Use cmd with proper quoting
+        cmd := 'cmd /c "adb -s ' . deviceSerial . ' exec-out screencap -p > "' . tempFile . '""'
+
+        OutputDebug("Executing alternative command: " . cmd)
+
+        exec := shell.Exec(cmd)
+        exec.StdIn.Close()
+
+        ; Wait for completion
+        while (exec.Status = 0) {
+            Sleep 100
+        }
+
+        ; Move temp file to final location
+        if (FileExist(tempFile)) {
+            FileCopy tempFile, savePath, 1
+            FileDelete(tempFile)
+            return FileExist(savePath)
+        }
+
+        return false
+
+    } catch Error as e {
+        OutputDebug("Exception in TakeADBScreenshotAlternative: " . e.message)
+        return false
+    }
+}
+
+; Updated main function call
+; Replace the TakeADBScreenshot call in main() with:
+/*
+if !TakeADBScreenshot(deviceSerial, screenshotFile) {
+    ; Try alternative method
+    if !TakeADBScreenshotAlternative(deviceSerial, screenshotFile) {
+        throw Error("Failed to take screenshot for device: " . deviceSerial)
+    }
+}
+*/
 ; --- Function: Convert image to base64 ---
 ImageToBase64(imagePath) {
     try {
@@ -173,27 +251,36 @@ ImageToBase64(imagePath) {
         return ""
     }
 }
-
 ; --- Function: Parse OCR response ---
 ParseOCRResponse(jsonResponse) {
     try {
-        ; Simple JSON parsing for the text field
-        ; This is a basic implementation - you might want to use a proper JSON parser
-        if (InStr(jsonResponse, '"text"')) {
-            ; Extract text value from JSON
-            start := InStr(jsonResponse, '"text"') + 7
-            start := InStr(jsonResponse, '"', false, start) + 1
-            end := InStr(jsonResponse, '"', false, start) - 1
-            
-            if (start > 0 && end > start) {
-                text := SubStr(jsonResponse, start, end - start + 1)
-                ; Join multiple lines if any
-                return StrReplace(StrReplace(text, "`r`n", " "), "`n", " ")
+        ; Parse JSON response
+        jsonObj := JSON.Load(jsonResponse)
+
+        ; Check if API returned success
+        if (!jsonObj.Has("ok") || !jsonObj["ok"]) {
+            ; API returned error
+            errorMessage := jsonObj.Has("message") ? jsonObj["message"] : "Unknown API error"
+            MsgBox("API Error: " . errorMessage, "OCR Error", 16) ; 16 = Error icon
+            return ""
+        }
+
+        ; Extract ParsedText from successful response
+        if (jsonObj.Has("data") && jsonObj["data"].Has("ParsedResults") && jsonObj["data"]["ParsedResults"].Length > 0) {
+            parsedResult := jsonObj["data"]["ParsedResults"][1] ; First result
+            if (parsedResult.Has("ParsedText")) {
+                return parsedResult["ParsedText"]
             }
         }
-        return jsonResponse ; Return full response if parsing fails
-    } catch {
+
+        ; Fallback if structure is unexpected
+        MsgBox("Unexpected API response structure", "OCR Warning", 48) ; 48 = Warning icon
         return jsonResponse
+
+    } catch Error as e {
+        ; JSON parsing failed
+        MsgBox("Failed to parse API response: " . e.message, "Parse Error", 16)
+        return ""
     }
 }
 
@@ -202,17 +289,18 @@ SaveResultsToJSON(results) {
     try {
         jsonContent := "{"
         first := true
-        
-        for deviceSerial, ocrText in results {
+
+        for deviceSerial, parsedText in results {
             if (!first) {
                 jsonContent .= ","
             }
-            jsonContent .= "`n  `"" . deviceSerial . "`": `"" . StrReplace(ocrText, '"', '\"') . "`""
+            ; Only save ParsedText content
+            jsonContent .= "`n  `"" . deviceSerial . "`": `"" . StrReplace(parsedText, '"', '\"') . "`""
             first := false
         }
-        
+
         jsonContent .= "`n}"
-        
+
         ; Save to file
         file := FileOpen("result.json", "w")
         file.Write(jsonContent)
@@ -226,12 +314,13 @@ SaveResultsToJSON(results) {
 CopyResultsToClipboard(results) {
     try {
         clipboardText := ""
-        
-        for deviceSerial, ocrText in results {
+
+        for deviceSerial, parsedText in results {
             if (clipboardText != "") {
                 clipboardText .= "`n"
             }
-            clipboardText .= ocrText
+            ; Only copy ParsedText content
+            clipboardText .= parsedText
         }
         
         A_Clipboard := clipboardText
@@ -271,8 +360,9 @@ BufGetSize(buf) {
 ; --- Function: POST base64 to API ---
 PostBase64ToOCR(base64Image) {
     try {
+        global ocrUrl
         http := ComObject("WinHttp.WinHttpRequest.5.1")
-        http.Open("POST", "https://f.zuko.pro/api/tools/ocr/parse", true)
+        http.Open("POST", ocrUrl, true)
         http.SetRequestHeader("Content-Type", "application/json")
         body := "{" . '"base64Image": "' . base64Image . '"}'
         http.Send(body)
@@ -281,7 +371,7 @@ PostBase64ToOCR(base64Image) {
         ; Store response for debugging
         global httpResponse := http.ResponseText
         global httpCode := http.Status
-        
+
         return http.ResponseText
     } catch Error as e {
         global httpResponse := "Error: " . e.message
@@ -291,4 +381,4 @@ PostBase64ToOCR(base64Image) {
 }
 
 ; --- Hotkey to run the script ---
-F1::main()
+^+F1::main()
