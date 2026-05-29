@@ -1,10 +1,73 @@
-﻿#NoEnv  ; Recommended for performance and compatibility with future AutoHotkey releases.
-; #Warn  ; Enable warnings to assist with detecting common errors.
-SendMode Input  ; Recommended for new scripts due to its superior speed and reliability.
-SetWorkingDir %A_ScriptDir%  ; Ensures a consistent starting directory.
+#Requires AutoHotkey v2.0
+#NoTrayIcon
+EnsureRestartFlag()
 
-MapIfWinActive (TargetWindow, SourceKey, TargetKey){
-	If(WinExists %TargetWindow%){
-		
-	}
+EnsureRestartFlag() {
+    fullCmd := StrGet(DllCall("GetCommandLineW", "Ptr"), "UTF-16")
+    if !InStr(fullCmd, "/restart") {
+        if A_IsCompiled
+            Run('"' A_ScriptFullPath '" /restart')
+        else
+            Run('"' A_AhkPath '" /restart "' A_ScriptFullPath '"')
+        ExitApp()
+    }
 }
+
+; ============================================================
+;  ACTION FUNCTIONS
+; ============================================================
+
+JetBrainsTabSwitch(*) {
+    SetKeyDelay(50, 50)
+    Send "{Blind}{Ctrl DownR}{e}{Ctrl up}"
+    Sleep(200)
+    Send "{Blind}{Enter}"
+}
+
+TerminalNewLine(*) {
+    saved := A_Clipboard
+    A_Clipboard := "`n"
+    ClipWait(1)
+    Send "^v"
+    Sleep 50
+    A_Clipboard := saved
+}
+
+; ============================================================
+;  MAPPING CONFIG  — edit only this section
+; ============================================================
+
+global Mappings := [
+    {
+        apps: ["ahk_exe phpstorm64.exe", "ahk_exe pycharm64.exe", "ahk_exe rider64.exe"],
+        keys: Map(
+            "^Tab",   JetBrainsTabSwitch,
+            ;"+Enter", "{Enter}",
+            ;"^Enter", "+{Enter}"
+        )
+    },
+    {
+        apps: ["ahk_exe WindowsTerminal.exe"],
+        keys: Map(
+            "+Enter", TerminalNewLine,
+            "^Enter", "{Enter}"
+        )
+    },
+]
+
+; ============================================================
+;  REGISTRATION — touch nothing below
+; ============================================================
+
+for _, group in Mappings {
+    for _, pattern in group.apps {
+        for srcKey, target in group.keys {
+            HotIfWinActive(pattern)
+            Hotkey(srcKey, MakeHandler(target))
+        }
+    }
+}
+
+HotIfWinActive()
+
+MakeHandler(target) => (hk) => (target is Func) ? target() : Send(target)
