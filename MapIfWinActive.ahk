@@ -1,6 +1,7 @@
 #Requires AutoHotkey v2.0
 #NoTrayIcon
 EnsureRestartFlag()
+EnsureStartupEntry()
 
 EnsureRestartFlag() {
     fullCmd := StrGet(DllCall("GetCommandLineW", "Ptr"), "UTF-16")
@@ -10,6 +11,24 @@ EnsureRestartFlag() {
         else
             Run('"' A_AhkPath '" /restart "' A_ScriptFullPath '"')
         ExitApp()
+    }
+}
+
+EnsureStartupEntry() {
+    entryName := "MapIfWinActive"
+    if A_IsCompiled
+        entryCmd := '"' A_ScriptFullPath '" /restart'
+    else
+        entryCmd := '"' A_AhkPath '" /restart "' A_ScriptFullPath '"'
+
+    Loop Reg, "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run", "KVR" {
+        if (A_LoopRegName = entryName) {
+            return
+        }
+    }
+
+    if MsgBox("Add MapIfWinActive to Windows startup?",, "YesNo") = "Yes" {
+        RegWrite(entryCmd, "REG_SZ", "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run", entryName)
     }
 }
 
