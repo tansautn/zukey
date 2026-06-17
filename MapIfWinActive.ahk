@@ -52,6 +52,39 @@ TerminalNewLine(*) {
     A_Clipboard := saved
 }
 
+TerminalTabToRight(*) {
+    tt := WinGetTitle("A")
+    if !InStr(tt, "✳")
+        Send "{Right}"
+}
+
+SearchEverywhereCmd(*) {
+    jetbrainsExes := ["phpstorm64.exe", "pycharm64.exe", "rider64.exe"]
+    for exe in jetbrainsExes {
+        if WinActive("ahk_exe " exe) {
+            return
+        }
+    }
+    Send "{LWin down}{LAlt down}{Space}{LWin up}{LAlt up}"
+}
+
+ShiftDoubleTap(key:="{LShift}") {
+    if (A_PriorHotkey != "~Shift" or A_TimeSincePriorHotkey > 400) {
+        KeyWait("Shift")
+        return
+    }
+    SearchEverywhereCmd()
+    ; static lastTime := 0, lastKey := ""
+    ; now := A_TickCount
+    ; if (lastKey = key && now - lastTime < 300) {
+        ; lastTime := 0
+        ; SearchEverywhereCmd()
+    ; } else {
+        ; lastTime := now
+        ; lastKey := key
+    ; }
+}
+
 ; ============================================================
 ;  MAPPING CONFIG  — edit only this section
 ; ============================================================
@@ -69,7 +102,20 @@ global Mappings := [
         apps: ["ahk_exe WindowsTerminal.exe"],
         keys: Map(
             "+Enter", TerminalNewLine,
-            "^Enter", "{Enter}"
+            "^Enter", "{Enter}",
+            ; "Tab",    TerminalTabToRight
+        )
+    },
+    ; {
+        ; apps: ["ahk_exe powershell.exe"],
+        ; keys: Map(
+            ; "Tab",    TerminalTabToRight
+        ; )
+    ; },
+    {
+        apps: [],
+        keys: Map(
+            "~Shift", ShiftDoubleTap,
         )
     },
 ]
@@ -79,10 +125,17 @@ global Mappings := [
 ; ============================================================
 
 for _, group in Mappings {
-    for _, pattern in group.apps {
+    if group.apps.Length = 0 {
+        HotIfWinActive()
         for srcKey, target in group.keys {
-            HotIfWinActive(pattern)
             Hotkey(srcKey, MakeHandler(target))
+        }
+    } else {
+        for _, pattern in group.apps {
+            HotIfWinActive(pattern)
+            for srcKey, target in group.keys {
+                Hotkey(srcKey, MakeHandler(target))
+            }
         }
     }
 }
