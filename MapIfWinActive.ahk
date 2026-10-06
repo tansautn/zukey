@@ -81,21 +81,49 @@ SearchEverywhereCmd(*) {
     SendEvent("#+q") ; Dùng SendEvent thay vì Send để kích hoạt Windows Global Hook tốt hơn
 }
 
-ShiftDoubleTap(key:="{LShift}") {
-    if (A_PriorHotkey != "~Shift" or A_TimeSincePriorHotkey > 400) {
-        KeyWait("Shift")
+; ---- Double-Shift state machine ----
+global WaitForSecondShift := false
+global FirstShiftAt       := 0
+global DoubleShiftMs      := 1500   ; timeout window
+
+DoubleShiftTimeout() {
+    global WaitForSecondShift
+    if WaitForSecondShift && (A_TickCount - FirstShiftAt > DoubleShiftMs) {
+        WaitForSecondShift := false
+        SetTimer(DoubleShiftTimeout, 0)   ; disarm
+    }
+}
+
+; Shift-up: chỉ arm/trigger nếu không có modifier và không có phím khác vừa được nhấn giữa hai Shift
+~LShift Up::
+~RShift Up:: {
+    global WaitForSecondShift, FirstShiftAt
+    ; Có modifier → reset và bỏ qua
+    if GetKeyState("Ctrl") || GetKeyState("Alt") || GetKeyState("LWin") || GetKeyState("RWin") {
+        WaitForSecondShift := false
+        SetTimer(DoubleShiftTimeout, 0)
         return
     }
-    SearchEverywhereCmd()
-    ; static lastTime := 0, lastKey := ""
-    ; now := A_TickCount
-    ; if (lastKey = key && now - lastTime < 300) {
-        ; lastTime := 0
-        ; SearchEverywhereCmd()
-    ; } else {
-        ; lastTime := now
-        ; lastKey := key
-    ; }
+    ; Phím vừa rồi không phải Shift → reset (user đã nhấn phím khác xen giữa)
+    priorIsShift := (A_PriorKey = "LShift" || A_PriorKey = "RShift" || A_PriorKey = "Shift")
+    if WaitForSecondShift {
+        if priorIsShift {
+            ; Second clean Shift-up → trigger
+            WaitForSecondShift := false
+            SetTimer(DoubleShiftTimeout, 0)
+            SearchEverywhereCmd()
+        } else {
+            ; Phím khác xen vào → reset, arm lại cho Shift này
+            WaitForSecondShift := true
+            FirstShiftAt := A_TickCount
+            SetTimer(DoubleShiftTimeout, 100)
+        }
+    } else {
+        ; First clean Shift-up → arm
+        WaitForSecondShift := true
+        FirstShiftAt := A_TickCount
+        SetTimer(DoubleShiftTimeout, 100)
+    }
 }
 
 ; ============================================================
@@ -562,9 +590,9 @@ global BuiltinList := [
     { id: "TerminalCtrlEnter", label: "Terminal: Ctrl+Enter -> Enter",
       hotkey: "^Enter", apps: ["ahk_exe WindowsTerminal.exe"],
       action: "{Enter}", ctx: "" },
-    { id: "ShiftDoubleTap", label: "Double-Shift -> Search Everywhere",
-      hotkey: "~Shift", apps: [],
-      action: ShiftDoubleTap, ctx: "" },
+    { id: "ShiftDoubleTap", label: "Double-Shift -> Search Everywhere (state-machine, ~LShift/~RShift Up)",
+      hotkey: "~LShift Up / ~RShift Up", apps: [],
+      action: "", ctx: "builtin-hardcoded" },
     { id: "ManagerGui", label: "Win+Alt+M -> Manage Shortcuts",
       hotkey: "#!m", apps: [],
       action: ShowManagerGui, ctx: "" },
@@ -598,6 +626,8 @@ ApplyBuiltins() {
 
     for b in BuiltinList {
         if !IsBuiltinEnabled(b.id)
+            continue
+        if (b.ctx = "builtin-hardcoded")   ; hotkey đã đăng ký tĩnh, bỏ qua
             continue
         handler := MakeHandler(b.action)
         if (b.ctx = "notJB") {
